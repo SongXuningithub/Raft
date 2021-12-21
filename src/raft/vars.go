@@ -7,16 +7,16 @@ const (
 )
 
 type LogEntry struct {
-	term    int
-	command interface{}
+	Term    int
+	Command interface{}
 }
 
 type RequestVoteArgs struct {
 	// Your data here.
-	Term        int
-	CandidateId int
-	//LastLogIndex int32
-	//LastLogTerm  int32
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -29,8 +29,12 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId int
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	entries      []LogEntry
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
