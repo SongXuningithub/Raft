@@ -105,11 +105,11 @@ func (rf *Raft) GenericRoutine() {
 	go func() {
 		for true {
 			rf.mu.Lock()
-			rfme := rf.me
+			//rfme := rf.me
 			curState := rf.state
 			rf.mu.Unlock()
 			if curState == FollowerState {
-				fmt.Println(rfme, " GenericRoutine, FollowerState")
+				//fmt.Println(rfme, " GenericRoutine, FollowerState")
 				select {
 				case <-time.After(rf.ElecTimeout):
 					rf.BecomeCandidate()
@@ -118,12 +118,12 @@ func (rf *Raft) GenericRoutine() {
 				}
 			}
 			if curState == CandidateState {
-				fmt.Println(rfme, " GenericRoutine, CandidateState")
+				//fmt.Println(rfme, " GenericRoutine, CandidateState")
 				select {
 				case <-time.After(rf.ElecTimeout):
 					rf.mu.Lock()
 					curState = rf.state
-					ElecSuccess := float64(rf.votes) > 0.5*float64(rf.validServers)
+					ElecSuccess := false //float64(rf.votes) > 0.5*float64(rf.validServers)
 					rf.mu.Unlock()
 					if curState != CandidateState {
 						continue
@@ -131,8 +131,8 @@ func (rf *Raft) GenericRoutine() {
 					if ElecSuccess {
 						rf.mu.Lock()
 						rf.BecomeLeader()
-						fmt.Println(rf.me, " rf.votes: ", rf.votes, " rf.validServers: ", rf.validServers, " in term ", rf.currentTerm)
-						fmt.Println(rf.me, " BecomeLeader 2 in term ", rf.currentTerm)
+						//fmt.Println(rf.me, " rf.votes: ", rf.votes, " rf.validServers: ", rf.validServers, " in term ", rf.currentTerm)
+						//fmt.Println(rf.me, " BecomeLeader 2 in term ", rf.currentTerm)
 						rf.mu.Unlock()
 					} else {
 						rf.BecomeCandidate()
@@ -143,7 +143,7 @@ func (rf *Raft) GenericRoutine() {
 
 			}
 			if curState == LeaderState {
-				fmt.Println(rfme, " GenericRoutine, LeaderState")
+				//fmt.Println(rfme, " GenericRoutine, LeaderState")
 				rf.SendHeartbeats()
 				//rf.mu.Lock()
 				//rf.HeartbeatTimer.Reset(rf.HeartInterval)
@@ -198,7 +198,7 @@ func (rf *Raft) StartElection(args RequestVoteArgs) {
 				if reply.Term > rf.currentTerm {
 					rf.BecomeFollower(reply.Term)
 				} else if reply.VoteGranted == true {
-					fmt.Println(rf.me, " gets vote from ", idx, "in term ", rf.currentTerm)
+					//fmt.Println(rf.me, " gets vote from ", idx, "in term ", rf.currentTerm)
 					rf.votes++
 					if float64(rf.votes) > 0.5*float64(len(rf.peers)) {
 						rf.BecomeLeader()
