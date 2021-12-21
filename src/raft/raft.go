@@ -57,20 +57,22 @@ type Raft struct {
 	votedFor    int
 	log         []LogEntry
 
-	votes          int
-	validServers   int
-	state          int
-	ElecTimeout    time.Duration
-	HeartInterval  time.Duration
-	ElectionTimer  *time.Timer
+	votes         int
+	validServers  int
+	state         int
+	resetChan     chan int
+	ElecTimeout   time.Duration
+	HeartInterval time.Duration
+	//ElectionTimer  *time.Timer
 	HeartbeatTimer *time.Timer
 }
 
 func (rf *Raft) RFInit() {
 	rf.ElecTimeout = time.Millisecond * time.Duration(rand.Intn(150)+150)
-	rf.HeartInterval = time.Millisecond * time.Duration(60)
-	rf.ElectionTimer = time.NewTimer(rf.ElecTimeout)
+	rf.HeartInterval = time.Millisecond * time.Duration(40)
+	//rf.ElectionTimer = time.NewTimer(rf.ElecTimeout)
 	rf.HeartbeatTimer = time.NewTimer(rf.HeartInterval)
+	rf.resetChan = make(chan int, 1)
 	rf.BecomeFollower(0)
 	rf.GenericRoutine()
 }
@@ -83,7 +85,7 @@ func (rf *Raft) BecomeCandidate() {
 	rf.votes = 1
 	rf.validServers = 1
 	args := RequestVoteArgs{rf.currentTerm, rf.me}
-	rf.ElectionTimer.Reset(rf.ElecTimeout)
+	//rf.ElectionTimer.Reset(rf.ElecTimeout)
 	rf.mu.Unlock()
 	rf.StartElection(args)
 	//rf.ElectionRoutine()
@@ -92,7 +94,7 @@ func (rf *Raft) BecomeCandidate() {
 func (rf *Raft) BecomeFollower(newTerm int) {
 	rf.state = FollowerState
 	rf.currentTerm = newTerm
-	rf.ElectionTimer.Reset(rf.ElecTimeout)
+	//rf.ElectionTimer.Reset(rf.ElecTimeout)
 }
 
 func (rf *Raft) BecomeLeader() {
@@ -103,37 +105,51 @@ func (rf *Raft) GenericRoutine() {
 	go func() {
 		for true {
 			rf.mu.Lock()
+			rfme := rf.me
 			curState := rf.state
 			rf.mu.Unlock()
 			if curState == FollowerState {
-				_ = <-rf.ElectionTimer.C
-				rf.BecomeCandidate()
-			}
-			if curState == CandidateState {
-				_ = <-rf.ElectionTimer.C
-				rf.mu.Lock()
-				curState = rf.state
-				ElecSuccess := float64(rf.votes) > 0.5*float64(rf.validServers)
-				rf.mu.Unlock()
-				if curState != CandidateState {
+				fmt.Println(rfme, " GenericRoutine, FollowerState")
+				select {
+				case <-time.After(rf.ElecTimeout):
+					rf.BecomeCandidate()
+				case <-rf.resetChan:
 					continue
 				}
-				if ElecSuccess {
+			}
+			if curState == CandidateState {
+				fmt.Println(rfme, " GenericRoutine, CandidateState")
+				select {
+				case <-time.After(rf.ElecTimeout):
 					rf.mu.Lock()
-					rf.BecomeLeader()
-					fmt.Println(rf.me, " rf.votes: ", rf.votes, " rf.validServers: ", rf.validServers, " in term ", rf.currentTerm)
-					fmt.Println(rf.me, " BecomeLeader 2 in term ", rf.currentTerm)
+					curState = rf.state
+					ElecSuccess := float64(rf.votes) > 0.5*float64(rf.validServers)
 					rf.mu.Unlock()
-				} else {
-					rf.BecomeCandidate()
+					if curState != CandidateState {
+						continue
+					}
+					if ElecSuccess {
+						rf.mu.Lock()
+						rf.BecomeLeader()
+						fmt.Println(rf.me, " rf.votes: ", rf.votes, " rf.validServers: ", rf.validServers, " in term ", rf.currentTerm)
+						fmt.Println(rf.me, " BecomeLeader 2 in term ", rf.currentTerm)
+						rf.mu.Unlock()
+					} else {
+						rf.BecomeCandidate()
+					}
+				case <-rf.resetChan:
+					continue
 				}
+
 			}
 			if curState == LeaderState {
-				rf.mu.Lock()
-				rf.HeartbeatTimer.Reset(rf.HeartInterval)
-				rf.mu.Unlock()
-				_ = <-rf.HeartbeatTimer.C
+				fmt.Println(rfme, " GenericRoutine, LeaderState")
 				rf.SendHeartbeats()
+				//rf.mu.Lock()
+				//rf.HeartbeatTimer.Reset(rf.HeartInterval)
+				//rf.mu.Unlock()
+				//_ = <-rf.HeartbeatTimer.C
+				time.Sleep(rf.HeartInterval)
 			}
 		}
 	}()
@@ -142,10 +158,14 @@ func (rf *Raft) GenericRoutine() {
 func (rf *Raft) SendHeartbeats() {
 	rf.mu.Lock()
 	args := AppendEntriesArgs{rf.currentTerm, rf.me}
+	rfme := rf.me
 	//fmt.Println(rf.me, " SendHeartbeats, term: ", rf.currentTerm)
 	rf.mu.Unlock()
 
 	for i := 0; i < len(rf.peers); i++ {
+		if i == rfme {
+			continue
+		}
 		go func(idx int) {
 			reply := &AppendEntriesReply{}
 			ok := rf.sendAppendEntries(idx, args, reply)
@@ -168,12 +188,14 @@ func (rf *Raft) StartElection(args RequestVoteArgs) {
 		go func(idx int) {
 			reply := &RequestVoteReply{}
 			ok := rf.sendRequestVote(idx, args, reply)
-			rf.mu.Lock()
 			if ok {
+				rf.mu.Lock()
 				rf.validServers++
 				if rf.state != CandidateState {
-
-				} else if reply.Term > rf.currentTerm {
+					rf.mu.Unlock()
+					return
+				}
+				if reply.Term > rf.currentTerm {
 					rf.BecomeFollower(reply.Term)
 				} else if reply.VoteGranted == true {
 					fmt.Println(rf.me, " gets vote from ", idx, "in term ", rf.currentTerm)
@@ -181,12 +203,15 @@ func (rf *Raft) StartElection(args RequestVoteArgs) {
 					if float64(rf.votes) > 0.5*float64(len(rf.peers)) {
 						rf.BecomeLeader()
 						fmt.Println(rf.me, " BecomeLeader 1 in term ", rf.currentTerm)
+						rf.resetChan <- 1
+						//fmt.Println(rf.me, " reset chan in StartElection, in term ", rf.currentTerm)
+
 					} else {
 						fmt.Println(len(rf.peers), " servers in term ", rf.currentTerm)
 					}
 				}
+				rf.mu.Unlock()
 			}
-			rf.mu.Unlock()
 		}(i)
 	}
 }
@@ -254,7 +279,10 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
-		rf.ElectionTimer.Reset(rf.ElecTimeout)
+		//rf.ElectionTimer.Reset(rf.ElecTimeout)
+		//fmt.Println(rf.me, " reset chan in RequestVote, in term ", rf.currentTerm)
+		rf.resetChan <- 1
+
 	}
 	rf.mu.Unlock()
 }
@@ -289,15 +317,22 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		reply.Success = false
 		return
 	}
-	if rf.state == FollowerState {
-		reply.Success = true
-		rf.ElectionTimer.Reset(rf.ElecTimeout)
-		rf.currentTerm = args.Term
-		return
-	}
 	if rf.state == LeaderState || rf.state == CandidateState {
 		rf.BecomeFollower(args.Term)
 	}
+	reply.Success = true
+	//fmt.Println(rf.me, " reset chan in AppendEntries, in term ", rf.currentTerm)
+	rf.resetChan <- 1
+
+	//if rf.state == FollowerState {
+	//	reply.Success = true
+	//	rf.ElectionTimer.Reset(rf.ElecTimeout)
+	//	rf.currentTerm = args.Term
+	//	return
+	//}
+	//if rf.state == LeaderState || rf.state == CandidateState {
+	//	rf.BecomeFollower(args.Term)
+	//}
 
 }
 
