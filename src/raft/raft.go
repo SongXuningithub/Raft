@@ -36,8 +36,8 @@ import "labrpc"
 type ApplyMsg struct {
 	Index       int
 	Command     interface{}
-	//UseSnapshot bool   // ignore for lab2; only used in lab3
-	//Snapshot    []byte // ignore for lab2; only used in lab3
+	UseSnapshot bool   // ignore for lab2; only used in lab3
+	Snapshot    []byte // ignore for lab2; only used in lab3
 }
 
 //
@@ -177,14 +177,13 @@ func (rf *Raft) UpdateCommitIdx() {
 			N++
 			continue
 		}
-		tmpFlag := true
+		num := 0.0
 		for _,matchVal := range rf.matchIndex{
-			if matchVal < N{
-				tmpFlag = false
-				break
+			if matchVal >= N{
+				num++
 			}
 		}
-		if tmpFlag{
+		if num > 0.5 * float64(len(rf.peers)){
 			newN = N
 			N++
 			continue
@@ -200,8 +199,41 @@ func (rf *Raft) UpdateCommitIdx() {
 func (rf *Raft) ApplyCmd() {
 	for rf.lastApplied < rf.commitIndex{
 		rf.lastApplied++
-		rf.applyCh <- ApplyMsg{rf.lastApplied,rf.log[rf.lastApplied].Command}
+		msg := ApplyMsg{
+			rf.lastApplied,
+			rf.log[rf.lastApplied].Command,
+			false,
+			make([]byte,0,1),
+		}
+		//fmt.Println(rf.me," apply msg: ",rf.lastApplied,",",rf.log[rf.lastApplied].Command)
+		rf.applyCh <- msg
 	}
+}
+
+func (rf *Raft)print_entries(){
+	var server string
+	if rf.state == LeaderState{
+		server = "Leader"
+	} else {
+		server = "Follower"
+	}
+	fmt.Print(server,rf.me," term: ",rf.currentTerm," log: ")
+	for idx,logentry := range rf.log{
+		fmt.Print("[",idx,",",logentry.Term,",",logentry.Command,"]")
+	}
+	fmt.Println()
+	//fmt.Println(rf.me," lastApplied: ",rf.matchIndex[0],)
+}
+
+func (rf *Raft)print_args_entries(prevlogindex int ,entries []LogEntry){
+	if len(entries) == 0{
+		return
+	}
+	print("server: ",rf.me," arg entries: ")
+	for idx,ent := range entries{
+		print("[",prevlogindex+idx,",",ent.Term,"]")
+	}
+	println()
 }
 
 func (rf *Raft) SyncEntries() {
@@ -223,7 +255,7 @@ func (rf *Raft) SyncEntries() {
 				} else {
 					entries = rf.log[prevlogindex+1:]
 				}
-
+				//rf.print_args_entries(prevlogindex,entries)
 				args := AppendEntriesArgs{
 					rf.currentTerm,
 					rf.me,
@@ -250,10 +282,16 @@ func (rf *Raft) SyncEntries() {
 					if reply.Success{
 						rf.matchIndex[idx] = prevlogindex + len(entries)
 						rf.nextIndex[idx] = rf.matchIndex[idx] + 1 //len(entries)
+						//fmt.Println("matchIndex: ")
+						//for idx,val := range rf.matchIndex{
+						//	print(idx,":",val,"  ")
+						//}
+						//fmt.Println()
 						rf.UpdateCommitIdx()
 						rf.ApplyCmd()
 					} else {
 						rf.nextIndex[idx] -= 1
+						//fmt.Println("leader: ",rf.me," nextIndex[",idx,"]-1 --> ",rf.nextIndex[idx])
 					}
 					if rf.matchIndex[idx] == rf.getlastindex(){  // synchronized
 						rf.mu.Unlock()
@@ -292,7 +330,7 @@ func (rf *Raft) StartElection(args RequestVoteArgs) {
 						rf.resetChan <- 1
 						//fmt.Println(rf.me, " reset chan in StartElection, in term ", rf.currentTerm)
 					} else {
-						fmt.Println(len(rf.peers), " servers in term ", rf.currentTerm)
+						//fmt.Println(len(rf.peers), " servers in term ", rf.currentTerm)
 					}
 				}
 				rf.mu.Unlock()
@@ -365,7 +403,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		return
 	}
-	if args.Term > rf.currentTerm || (args.Term == rf.currentTerm && args.LastLogIndex >= rf.getlastindex()) {
+	if args.LastLogTerm > rf.log[rf.getlastindex()].Term || (args.LastLogTerm == rf.log[rf.getlastindex()].Term && args.LastLogIndex >= rf.getlastindex()) {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		//rf.ElectionTimer.Reset(rf.ElecTimeout)
@@ -413,11 +451,13 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		reply.Success = false
+		//fmt.Println(args.Term, " < ", rf.currentTerm)
 		return
 	}
 	if rf.state == LeaderState || rf.state == CandidateState {
 		rf.BecomeFollower(args.Term)
 	}
+	//rf.print_args_entries(args.PrevLogIndex,args.Entries)
 	if args.PrevLogIndex > rf.getlastindex(){
 		reply.Success = false
 	} else {
@@ -426,13 +466,18 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		} else {
 			reply.Success = true
 			rf.log = rf.log[0 : args.PrevLogIndex + 1]     //remove conflicting entries
-			for _,tmpEntry := range args.entries {
+			change := false
+			for _,tmpEntry := range args.Entries {
 				rf.log = append(rf.log, tmpEntry)
+				change = true
 			}
-		}
-		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = getmin(args.LeaderCommit, rf.getlastindex())
-			rf.ApplyCmd()
+			if(change){
+				//rf.print_entries()
+			}
+			if args.LeaderCommit > rf.commitIndex {
+				rf.commitIndex = getmin(args.LeaderCommit, rf.getlastindex())
+				rf.ApplyCmd()
+			}
 		}
 	}
 	//fmt.Println(rf.me, " reset chan in AppendEntries, in term ", rf.currentTerm)
@@ -473,7 +518,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	NewEntry := LogEntry{Term: term, Command: command}
 	rf.log = append(rf.log, NewEntry)
 	rf.matchIndex[rf.me] = index
-	fmt.Println("Server sends command to ", rf.me)
+	fmt.Println("Client sends command to ", rf.me)
+	//rf.print_entries()
 	return index, term, isLeader
 }
 
