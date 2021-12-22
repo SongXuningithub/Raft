@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -75,21 +77,27 @@ type Raft struct {
 
 func (rf *Raft) RFInit() {
 	rf.ElecTimeout = time.Millisecond * time.Duration(rand.Intn(150)+150)
-	rf.HeartInterval = time.Millisecond * time.Duration(40)
+	rf.HeartInterval = time.Millisecond * time.Duration(85)
 	//rf.ElectionTimer = time.NewTimer(rf.ElecTimeout)
 	rf.HeartbeatTimer = time.NewTimer(rf.HeartInterval)
 	rf.resetChan = make(chan int, 1)
+	rf.state = FollowerState
+
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.log = make([]LogEntry,0,1)
+	rf.log = append(rf.log, LogEntry{0,1313})
+
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	for idx,_ := range rf.matchIndex{
 		rf.matchIndex[idx] = 0
 	}
-	rf.log = make([]LogEntry,0,1)
-	rf.log = append(rf.log, LogEntry{0,0})
-	rf.BecomeFollower(0)
-	rf.GenericRoutine()
+
+	//rf.persist()
 }
 
 func (rf *Raft) BecomeCandidate() {
@@ -106,6 +114,7 @@ func (rf *Raft) BecomeCandidate() {
 		rf.log[rf.getlastindex()].Term,
 	}
 	//rf.ElectionTimer.Reset(rf.ElecTimeout)
+	rf.persist()
 	rf.mu.Unlock()
 	rf.StartElection(args)
 	//rf.ElectionRoutine()
@@ -114,6 +123,7 @@ func (rf *Raft) BecomeCandidate() {
 func (rf *Raft) BecomeFollower(newTerm int) {
 	rf.state = FollowerState
 	rf.currentTerm = newTerm
+	rf.persist()
 	//rf.ElectionTimer.Reset(rf.ElecTimeout)
 }
 
@@ -124,6 +134,7 @@ func (rf *Raft) BecomeLeader() {
 		rf.nextIndex[idx] = tmpval + 1
 		rf.matchIndex[idx] = 0
 	}
+	rf.persist()
 }
 
 func (rf *Raft) GenericRoutine() {
@@ -360,12 +371,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here.
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := gob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -374,10 +386,26 @@ func (rf *Raft) persist() {
 func (rf *Raft) readPersist(data []byte) {
 	// Your code here.
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := gob.NewDecoder(r)
-	// d.Decode(&rf.xxx)
-	// d.Decode(&rf.yyy)
+	println("data len: ",len(data))
+	if data == nil || len(data) == 0{
+		fmt.Println("empty data")
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	//fmt.Print("before change: currentTerm: ",rf.currentTerm," votedFor: ",rf.votedFor," log: ")
+	//for _,val := range rf.log {
+	//	fmt.Print(val.Term,",",val.Command," ")
+	//}
+	//fmt.Println()
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.log)
+	//fmt.Print(rf.me," readPersist: currentTerm: ",rf.currentTerm," votedFor: ",rf.votedFor," log: ")
+	//for _,val := range rf.log {
+	//	fmt.Print(val.Term,",",val.Command," ")
+	//}
+	//fmt.Println()
 }
 
 //
@@ -399,6 +427,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		}
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.persist()
 	}
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		return
@@ -406,6 +435,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if args.LastLogTerm > rf.log[rf.getlastindex()].Term || (args.LastLogTerm == rf.log[rf.getlastindex()].Term && args.LastLogIndex >= rf.getlastindex()) {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
+		rf.persist()
 		//rf.ElectionTimer.Reset(rf.ElecTimeout)
 		//fmt.Println(rf.me, " reset chan in RequestVote, in term ", rf.currentTerm)
 		rf.resetChan <- 1
@@ -478,6 +508,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 				rf.commitIndex = getmin(args.LeaderCommit, rf.getlastindex())
 				rf.ApplyCmd()
 			}
+			rf.persist()
 		}
 	}
 	//fmt.Println(rf.me, " reset chan in AppendEntries, in term ", rf.currentTerm)
@@ -518,7 +549,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	NewEntry := LogEntry{Term: term, Command: command}
 	rf.log = append(rf.log, NewEntry)
 	rf.matchIndex[rf.me] = index
-	fmt.Println("Client sends command to ", rf.me)
+	rf.persist()
+	//fmt.Println("Client sends command to ", rf.me)
 	//rf.print_entries()
 	return index, term, isLeader
 }
@@ -555,6 +587,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.RFInit()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	//rf.BecomeFollower(0)
+	rf.GenericRoutine()
 	return rf
 }
